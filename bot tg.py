@@ -122,6 +122,28 @@ async def get_all_users():
         cursor = await db.execute('SELECT user_id, username FROM users')
         return await cursor.fetchall()
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ СТАТИСТИКИ ---
+async def get_user_stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('''
+            SELECT 
+                COUNT(*), 
+                SUM(CASE WHEN is_banned = 0 THEN 1 ELSE 0 END), 
+                SUM(CASE WHEN is_banned = 1 THEN 1 ELSE 0 END), 
+                COALESCE(SUM(suggested_count), 0), 
+                COALESCE(SUM(approved_count), 0) 
+            FROM users
+        ''')
+        result = await cursor.fetchone()
+        return {
+            'total': result[0] or 0,
+            'active': result[1] or 0,
+            'banned': result[2] or 0,
+            'suggested': result[3] or 0,
+            'approved': result[4] or 0
+        }
+# ------------------------------------
+
 async def get_all_channels():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('SELECT id, channel_id, channel_name FROM channels')
@@ -208,6 +230,8 @@ async def get_admin_panel():
     auto_emoji = "🔴 Выкл" if auto_mode == "Выкл" else "🟢 Вкл"
     anon_emoji = "🔴 Выкл" if anon_mode == "Выкл" else "🟢 Вкл"
     
+    # Добавлена кнопка статистики в самое начало
+    builder.row(InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats"))
     builder.row(InlineKeyboardButton(text="➕ Подвязать канал", callback_data="admin_add_channel"))
     builder.row(InlineKeyboardButton(text="👥 Админы", callback_data="admin_manage_admins"))
     builder.row(InlineKeyboardButton(text="✏️ Тексты", callback_data="admin_texts"))
@@ -351,6 +375,28 @@ async def cmd_admin(message: types.Message):
             await message.reply("❌ У вас нет доступа")
     except Exception as e:
         logger.error(f"Ошибка в /admin: {e}")
+
+# --- НОВЫЙ ОБРАБОТЧИК СТАТИСТИКИ ---
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats(callback: types.CallbackQuery):
+    try:
+        stats = await get_user_stats()
+        text = (
+            "📊 **Статистика бота**\n\n"
+            f"👥 Всего пользователей: {stats['total']}\n"
+            f"✅ Активных: {stats['active']}\n"
+            f"🚫 Забанено: {stats['banned']}\n\n"
+            f"📩 Всего предложений: {stats['suggested']}\n"
+            f"✅ Опубликовано: {stats['approved']}"
+        )
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back"))
+        await callback.message.edit_text(text, reply_markup=builder.as_markup())
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка статистики: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
+# -----------------------------------
 
 @dp.callback_query(F.data == "admin_add_channel")
 async def channel_add_start(callback: types.CallbackQuery, state: FSMContext):
@@ -761,16 +807,13 @@ async def handle_anonymity_choice(callback: types.CallbackQuery, state: FSMConte
         logger.error(f"Ошибка в handle_anonymity_choice: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
 
-# --- ДОБАВЛЕННЫЙ ОБРАБОТЧИК ОТКЛОНЕНИЯ (ИСПРАВЛЕНИЕ БАГА) ---
 @dp.callback_query(F.data.startswith("reject_"))
 async def callback_reject(callback: types.CallbackQuery):
     try:
         user_id = int(callback.data.split("_")[1])
         
-        # Удаляем сообщение у админа
         await callback.message.delete()
         
-        # Уведомляем пользователя
         try:
             text_rejected = await get_setting('text_rejected')
             await bot.send_message(
@@ -784,7 +827,6 @@ async def callback_reject(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка отклонения: {e}")
         await callback.answer("❌ Ошибка", show_alert=True)
-# -------------------------------------------------------------
 
 @dp.callback_query(F.data.startswith("publish_"))
 async def callback_publish(callback: types.CallbackQuery):
@@ -797,7 +839,6 @@ async def callback_publish(callback: types.CallbackQuery):
         
         original_text = callback.message.caption or callback.message.text
         
-        # Получаем текст предложения (убраны ** из поиска, так как мы их убрали из шаблона)
         if "📝 Текст:" in original_text:
             content_text = original_text.split("📝 Текст:\n")[-1].strip()
         else:
@@ -808,16 +849,13 @@ async def callback_publish(callback: types.CallbackQuery):
             else:
                 content_text = original_text
         
-        # Получаем username если не анонимно
         user_mention = ""
         if not is_anonymous and "👤 От:" in original_text:
             mention_line = original_text.split("👤 От:")[1].split("\n")[0].strip()
             user_mention = mention_line
         
-        # Получаем настройку подписи
         caption_setting = await get_setting('caption')
         
-        # Формируем итоговый текст для публикации
         if is_anonymous:
             publish_text = content_text
             logger.info(f"Анонимная публикация: {publish_text}")
@@ -837,10 +875,19 @@ async def callback_publish(callback: types.CallbackQuery):
         for channel in channels:
             channel_id = channel[1]
             try:
-                await bot.send_message(
-                    chat_id=channel_id,
-                    text=publish_text
-                )
+                # --- ИСПРАВЛЕНИЕ: ПРОВЕРКА НА НАЛИЧИЕ ФОТО ---
+                if callback.message.photo:
+                    await bot.send_photo(
+                        chat_id=channel_id,
+                        photo=callback.message.photo[-1].file_id,
+                        caption=publish_text
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=channel_id,
+                        text=publish_text
+                    )
+                # ----------------------------------------------
                 logger.info(f"Опубликовано в канал {channel_id}")
             except Exception as e:
                 logger.error(f"Не удалось опубликовать в канал {channel_id}: {e}")
@@ -1045,7 +1092,10 @@ async def handle_suggestion_start(message: types.Message, state: FSMContext):
             user = await get_user(message.from_user.id)
         
         if user and user[2]:
-            await message.reply("❌ Вы забанены.")
+            try:
+                await message.reply("❌ Вы забанены.")
+            except:
+                await message.answer("❌ Вы забанены.")
             return
         
         subscribe_channels = await get_all_subscribe_channels()
@@ -1059,21 +1109,40 @@ async def handle_suggestion_start(message: types.Message, state: FSMContext):
                     channels_text += f"• {ch_name or channel_link}\n"
                 
                 channels_text += "\nПосле подписки отправьте любое сообщение."
-                await message.reply(channels_text)
+                try:
+                    await message.reply(channels_text)
+                except:
+                    await message.answer(channels_text)
                 return
         
         await state.update_data(suggestion_message=message)
         
-        await message.reply(
-            "Хотите ли вы отправить новость анонимно?",
-            reply_markup=await get_anonymity_keyboard()
-        )
+        try:
+            await message.reply(
+                "Хотите ли вы отправить новость анонимно?",
+                reply_markup=await get_anonymity_keyboard()
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки сообщения: {e}")
+            try:
+                await message.answer(
+                    "Хотите ли вы отправить новость анонимно?",
+                    reply_markup=await get_anonymity_keyboard()
+                )
+            except:
+                pass
         
         await state.set_state(SetupStates.waiting_suggestion)
         
     except Exception as e:
         logger.error(f"Ошибка в handle_suggestion_start: {e}")
-        await message.reply("❌ Произошла ошибка")
+        try:
+            await message.reply("❌ Произошла ошибка")
+        except:
+            try:
+                await message.answer("❌ Произошла ошибка")
+            except:
+                pass
 
 async def on_startup():
     logger.info("🚀 Бот запускается...")
