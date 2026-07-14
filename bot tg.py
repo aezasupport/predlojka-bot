@@ -11,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import aiosqlite
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8491392785:AAFOO5KCO_PEetSpG44zibKTm-RL1If7HKI")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8491392785:AAFOO5KCO_PEetSpG44zibKTm-RL1If7HKI)
 MAIN_ADMIN = 6846734926
 
 DB_PATH = "suggestions.db"
